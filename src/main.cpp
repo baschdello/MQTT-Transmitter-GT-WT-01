@@ -358,10 +358,21 @@ void maintainMqtt() {
 // ---------------- Serial-Menue ----------------
 
 void printMenu() {
+  bool wlan = WiFi.status() == WL_CONNECTED;
   Serial.println(F("\n=== GT-WT-01 ESP32 ==="));
-  Serial.printf("Quelle: %s | Kanal: %u | ID: %u | Topic: %s\n",
+  Serial.printf("WLAN: %s | SSID: %s", wlan ? "verbunden" : "nicht verbunden", wifiSsid);
+  if (wlan) {
+    Serial.printf(" | IP: %s Maske: %s Gateway: %s",
+                  WiFi.localIP().toString().c_str(),
+                  WiFi.subnetMask().toString().c_str(),
+                  WiFi.gatewayIP().toString().c_str());
+  }
+  Serial.println();
+  Serial.printf("Broker: %s:%d | Quelle: %s | Kanal: %u | ID: %u\n",
+                mqttServer, MQTT_PORT,
                 dataSource == SOURCE_BME280 ? "BME280" : "MQTT",
-                channel, sensorId, mqttTopic);
+                channel, sensorId);
+  Serial.printf("Topic: %s\n", mqttTopic);
   Serial.printf("JSON Temp: %s | JSON Hum: %s\n", jsonKeyTemp, jsonKeyHum);
   Serial.println(F("1 = Datenquelle BME280"));
   Serial.println(F("2 = Datenquelle MQTT"));
@@ -375,11 +386,11 @@ void printMenu() {
   Serial.println(F("w <ssid> = WLAN-SSID setzen"));
   Serial.println(F("p <password> = WLAN-Passwort setzen"));
   Serial.println(F("b <ip/host> = MQTT-Broker setzen"));
-  Serial.println(F("m = Menue anzeigen"));
+  Serial.println(F("(leere Eingabe = Menue neu anzeigen)"));
 }
 
 void processCommand(String line) {
-  if (line.length() == 0) return;
+  if (line.length() == 0) { printMenu(); return; }
   char cmd = line.charAt(0);
   String arg = line.substring(1);
   arg.trim();
@@ -399,8 +410,9 @@ void processCommand(String line) {
       break;
     case '3':
       if (arg.length() > 0 && arg.length() < sizeof(mqttTopic)) {
+        if (mqtt.connected()) mqtt.unsubscribe(mqttTopic);  // altes Topic abbestellen
         arg.toCharArray(mqttTopic, sizeof(mqttTopic));
-        if (mqtt.connected()) { mqtt.unsubscribe(mqttTopic); mqtt.subscribe(mqttTopic); }
+        if (mqtt.connected()) mqtt.subscribe(mqttTopic);
         Serial.printf("Topic: %s\n", mqttTopic);
       } else Serial.println(F("Topic leer/zu lang"));
       break;
@@ -469,11 +481,8 @@ void processCommand(String line) {
         Serial.printf("MQTT-Broker: %s:%d\n", mqttServer, MQTT_PORT);
       } else Serial.println(F("Broker leer/zu lang"));
       break;
-    case 'm':
-      printMenu();
-      break;
     default:
-      Serial.println(F("Unbekanntes Kommando, 'm' fuer Menue"));
+      Serial.println(F("Unbekanntes Kommando"));
   }
   printMenu();
 }
@@ -482,8 +491,21 @@ void handleSerial() {
   static String line;
   while (Serial.available()) {
     char c = (char)Serial.read();
-    if (c == '\n') { processCommand(line); line = ""; }
-    else if (c != '\r') line += c;
+    if (c == '\n') {
+      Serial.println();
+      processCommand(line);
+      line = "";
+    } else if (c == '\r') {
+      // CR ignorieren (Serial-Monitor sendet CR+LF)
+    } else if (c == '\b' || c == 0x7F) {
+      if (line.length() > 0) {
+        line.remove(line.length() - 1);
+        Serial.print("\b \b");  // Zeichen im Terminal zuruecknehmen
+      }
+    } else if (c >= 32 && c < 127) {
+      line += c;
+      Serial.print(c);
+    }
   }
 }
 
@@ -498,4 +520,3 @@ void loop() {
     else Serial.println(F("Datenquelle liefert keine gueltigen Werte"));
   }
 }
-
