@@ -16,6 +16,8 @@
 // Checksumme = Nibble-Summe (b0..b3, letztes Nibble b3&0xE) mod 64
 //
 // Datenquelle waehlbar: BME280 (I2C) oder MQTT-Topic mit JSON-Payload
+// Temperatur-Offset (C) auf beide Quellen anwendbar, wird vor der
+// ASK-Aussendung aufgerechnet (Menue-Kommando 'o')
 // Laufzeit-Konfiguration ueber Serial-Menue (115200)
 //
 // PlatformIO lib_deps:
@@ -64,11 +66,12 @@ uint8_t dataSource = SOURCE_BME280;
 char mqttTopic[64] = "wetter/gt-wt01";
 char jsonKeyTemp[48] = "temperature";
 char jsonKeyHum[48] = "humidity";
+float tempOffset = 0.0f;            // Aufschlag auf die Temperatur vor der ASK-Sendung (C)
 
 // Persistente Konfiguration (EEPROM/Flash) mit Integritaets-Checksumme
 #define EEPROM_SIZE   512
 #define PERSIST_MAGIC   0x47575431u  // "GWT1"
-#define PERSIST_VERSION 2
+#define PERSIST_VERSION 3
 
 struct PersistData {
   uint32_t magic;
@@ -82,6 +85,7 @@ struct PersistData {
   char     wifiSsid[33];
   char     wifiPass[65];
   char     mqttServer[64];
+  float    tempOffset;
   uint32_t checksum;   // FNV-1a ueber alle Felder davor
 };
 
@@ -107,6 +111,7 @@ void saveConfig() {
   strncpy(p.wifiSsid, wifiSsid, sizeof(p.wifiSsid) - 1);
   strncpy(p.wifiPass, wifiPass, sizeof(p.wifiPass) - 1);
   strncpy(p.mqttServer, mqttServer, sizeof(p.mqttServer) - 1);
+  p.tempOffset = tempOffset;
   p.checksum = persistChecksum(p);
   EEPROM.begin(EEPROM_SIZE);
   EEPROM.put(0, p);
@@ -132,6 +137,7 @@ bool loadConfig() {
   p.mqttServer[sizeof(p.mqttServer) - 1] = 0;
   if (p.mqttTopic[0] == 0 || p.jsonKeyTemp[0] == 0 || p.jsonKeyHum[0] == 0) return false;
   if (p.wifiSsid[0] == 0 || p.mqttServer[0] == 0) return false;
+  if (isnan(p.tempOffset) || p.tempOffset < -20.0f || p.tempOffset > 20.0f) return false;
   dataSource = p.dataSource;
   channel = p.channel;
   sensorId = p.sensorId;
@@ -141,6 +147,7 @@ bool loadConfig() {
   strncpy(wifiSsid, p.wifiSsid, sizeof(wifiSsid) - 1);
   strncpy(wifiPass, p.wifiPass, sizeof(wifiPass) - 1);
   strncpy(mqttServer, p.mqttServer, sizeof(mqttServer) - 1);
+  tempOffset = p.tempOffset;
   return true;
 }
 
@@ -208,7 +215,10 @@ void sendPacket(const uint8_t *msg) {
 }
 
 // Komplette Aussendung: 6 Pakete, Timing identisch zum Originalmitschnitt
+// tempC ist der Rohwert der Quelle (BME280 oder MQTT); der konfigurierte
+// tempOffset wird hier zentral vor der ASK-Ausgabe aufgerechnet
 void sendTransmission(float tempC, float humidity) {
+  tempC += tempOffset;
   int16_t t = constrain((int16_t)roundf(tempC * 10.0f), -200, 600);
   uint16_t tempRaw = (uint16_t)t;
   uint8_t hum = (uint8_t)constrain((int)roundf(humidity), 0, 99);
@@ -374,6 +384,7 @@ void printMenu() {
                 channel, sensorId);
   Serial.printf("Topic: %s\n", mqttTopic);
   Serial.printf("JSON Temp: %s | JSON Hum: %s\n", jsonKeyTemp, jsonKeyHum);
+  Serial.printf("Temp-Offset: %+.1f C\n", tempOffset);
   Serial.println(F("1 = Datenquelle BME280"));
   Serial.println(F("2 = Datenquelle MQTT"));
   Serial.println(F("3 <topic> = MQTT-Topic setzen"));
@@ -383,6 +394,8 @@ void printMenu() {
   Serial.println(F("7 <0-255> = Sende-ID setzen"));
   Serial.println(F("8 = Button-Bit setzen und sofort senden"));
   Serial.println(F("9 = Konfiguration persistent speichern"));
+  Serial.println(F("o <wert> = Temperatur-Offset setzen (C, z.B. 'o 2.5' oder 'o -1.3')"));
+  Serial.println(F("o = aktuellen Temperatur-Offset anzeigen"));
   Serial.println(F("w <ssid> = WLAN-SSID setzen"));
   Serial.println(F("p <password> = WLAN-Passwort setzen"));
   Serial.println(F("b <ip/host> = MQTT-Broker setzen"));
@@ -449,13 +462,29 @@ void processCommand(String line) {
         break;
       }
       buttonPressed = true;
-      Serial.printf("Sofortsendung: %.1f C / %.0f %%\n", t, h);
+      Serial.printf("Sofortsendung: %.1f C (Roh %.1f C, Offset %+.1f C) / %.0f %%\n",
+                    t + tempOffset, t, tempOffset, h);
       sendTransmission(t, h);
       break;
     }
     case '9':
       saveConfig();
       break;
+    case 'o': {
+      if (arg.length() == 0) {
+        Serial.printf("Temp-Offset: %+.1f C\n", tempOffset);
+        break;
+      }
+      char *e = nullptr;
+      float f = strtof(arg.c_str(), &e);
+      if (e != arg.c_str() && *e == 0 && f >= -20.0f && f <= 20.0f) {
+        tempOffset = f;
+        Serial.printf("Temp-Offset: %+.1f C (wirkt auf alle Sendungen, Quelle egal)\n", tempOffset);
+      } else {
+        Serial.println(F("Offset-Zahl erwartet, z.B. 'o 2.5' oder 'o -1.3' (-20.0 bis 20.0)"));
+      }
+      break;
+    }
     case 'w':
       if (arg.length() > 0 && arg.length() < sizeof(wifiSsid)) {
         arg.toCharArray(wifiSsid, sizeof(wifiSsid));
